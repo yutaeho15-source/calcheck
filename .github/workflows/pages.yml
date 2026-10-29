@@ -1,6 +1,5 @@
 # main에 푸시하면 빌드해서 GitHub Pages에 올린다.
-# 클라이언트 ID는 저장소 Variables(Settings → Secrets and variables → Actions → Variables)의
-# VITE_GOOGLE_CLIENT_ID 에서 읽는다. 웹 OAuth 클라이언트 ID는 비밀이 아니라 Variable로 충분하다.
+# 클라이언트 ID는 .env.production에서 읽는다 (저장소 Variable VITE_GOOGLE_CLIENT_ID가 있으면 그것이 우선).
 name: Deploy to GitHub Pages
 on:
   push:
@@ -26,7 +25,6 @@ jobs:
       - run: npm test
       - run: npm run build
         env:
-          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
           VITE_BASE: /${{ github.event.repository.name }}/
       - uses: actions/upload-pages-artifact@v3
         with:
