@@ -14,9 +14,11 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["icon.svg"],
       manifest: {
+        id: base,
         name: "CalCheck",
         short_name: "CalCheck",
-        description: "구글 캘린더 연동 체크리스트",
+        description: "구글 캘린더를 원본으로 쓰는 체크리스트. 오늘 일정을 체크하고 쌓인 일을 회차로 나눠요.",
+        orientation: "portrait",
         lang: "ko",
         start_url: base,
         scope: base,
