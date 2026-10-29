@@ -3,3 +3,10 @@ dist
 dev-dist
 .env
 .env.local
+android/*.jks
+android/keystore-password.txt
+android/.gradle
+android/build
+android/app/build
+android/local.properties
+android/.idea

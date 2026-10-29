@@ -1,0 +1,60 @@
+// CalCheck — Trusted Web Activity 껍데기.
+// 앱 자체는 https://yutaeho15-source.github.io/calcheck/ 에 있고, 이 APK는 그걸 크롬 엔진으로 전체 화면에 띄운다.
+// 웹을 고치면 APK를 다시 설치할 필요 없이 바로 반영된다. 이 프로젝트를 다시 빌드할 일은 아이콘·이름·패키지가 바뀔 때뿐.
+plugins {
+    id("com.android.application")
+}
+
+def keystoreProps = new Properties()
+def keystorePwFile = rootProject.file("keystore-password.txt")
+def keystorePw = keystorePwFile.exists() ? keystorePwFile.text.trim() : ""
+
+android {
+    namespace "com.yutaeho.calcheck"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.yutaeho.calcheck"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+
+        // TWA 설정. assetlinks.json의 package_name·지문과 맞아야 주소창이 사라진다.
+        resValue "string", "app_name", "CalCheck"
+        manifestPlaceholders = [
+            hostName: "yutaeho15-source.github.io",
+            defaultUrl: "https://yutaeho15-source.github.io/calcheck/",
+            launcherName: "CalCheck",
+        ]
+    }
+
+    signingConfigs {
+        release {
+            storeFile rootProject.file("calcheck-release.jks")
+            storePassword keystorePw
+            keyAlias "calcheck"
+            keyPassword keystorePw
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            // 디버그 빌드도 같은 키로 서명해서 assetlinks 검증이 통과하게 한다.
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "com.google.androidbrowserhelper:androidbrowserhelper:2.5.0"
+}

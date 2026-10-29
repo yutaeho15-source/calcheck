@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.yutaeho.calcheck",
+    "sha256_cert_fingerprints": ["9D:55:F0:18:AD:68:E7:B0:59:1A:0F:53:B5:19:F9:60:11:26:42:5F:88:D8:D5:BD:57:93:F6:34:39:9D:E9:B2"]
+  }
+}]
