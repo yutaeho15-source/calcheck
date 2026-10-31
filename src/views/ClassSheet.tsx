@@ -19,7 +19,7 @@ export default function ClassSheet({ event, onClose }: { event: ExtEvent; onClos
   }, [onClose]);
 
   const k = event.klass!;
-  const isOneOff = !k.masterId;
+  const isOneOff = !!k.oneOffId;
 
   return (
     <div className="sheet-backdrop" onClick={onClose}>
@@ -41,7 +41,7 @@ export default function ClassSheet({ event, onClose }: { event: ExtEvent; onClos
               aria-checked={k.status === st}
               className={`status-opt ${st} ${k.status === st ? "on" : ""}`}
               onClick={() => {
-                void setClassStatus(event, st);
+                setClassStatus(event, st);
                 onClose();
               }}
             >
@@ -49,13 +49,13 @@ export default function ClassSheet({ event, onClose }: { event: ExtEvent; onClos
             </button>
           ))}
         </div>
-        <p className="hint">이 날 한 회차에만 적용돼요. 캘린더 위젯에는 "휴강 · 과목명"처럼 제목 앞에 붙어서 보여요.</p>
+        <p className="hint">이 날 한 회차에만 적용돼요. 이 앱 안에서만 표시되고 구글 캘린더에는 올라가지 않아요.</p>
         <div className="sheet-actions">
           {isOneOff && (
             <button
               className="danger"
               onClick={() => {
-                void deleteOneOff(event);
+                deleteOneOff(event);
                 onClose();
               }}
             >

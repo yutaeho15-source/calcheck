@@ -1,10 +1,15 @@
-// Google Identity Services 토큰 클라이언트 (스펙 6절).
-// 서버 없이 브라우저에서 1시간짜리 access token만 받는다. refresh token은 쓰지 않는다 —
-// 그래서 동의 화면이 "테스트" 상태여도 7일 만료 문제가 없고, 저장할 비밀도 없다.
-// 토큰은 메모리에만 둔다. localStorage에 남기면 그것이 또 하나의 "원본"이 된다.
+// Google Identity Services 토큰 클라이언트.
+// 권한은 읽기 전용(calendar.readonly) — 앱이 만든 것은 전부 기기에 남고, 코드 버그로도 캘린더에 쓸 수 없다.
+//
+// 자동 로그인: 한 번 로그인하면 (토큰, 만료시각)을 기기에 저장한다. 다음에 열 때
+//   1) 저장된 토큰이 아직 유효하면 그대로 쓰고,
+//   2) 만료됐으면 prompt:'none'으로 조용히 새 토큰을 받는다 (크롬에 구글 세션이 살아 있으면 팝업 없이 성공).
+//   3) 그것도 실패하면 로그인 버튼을 보여 준다.
+// 로그아웃은 저장된 토큰을 지우고 구글에 revoke한다.
 
-export const SCOPE = "https://www.googleapis.com/auth/calendar";
+export const SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
+const LS_AUTH = "calcheck.auth";
 
 interface TokenResponse {
   access_token?: string;
@@ -15,6 +20,7 @@ interface TokenResponse {
 interface TokenClient {
   requestAccessToken(opts?: { prompt?: string }): void;
   callback?: (r: TokenResponse) => void;
+  error_callback?: (e: { type: string; message?: string }) => void;
 }
 declare global {
   interface Window {
@@ -39,8 +45,40 @@ let expiresAt = 0;
 let client: TokenClient | null = null;
 let gisLoading: Promise<void> | null = null;
 
+// 저장된 토큰 복구
+try {
+  const raw = localStorage.getItem(LS_AUTH);
+  if (raw) {
+    const j = JSON.parse(raw) as { token?: string; expiresAt?: number };
+    if (j.token && j.expiresAt && j.expiresAt > Date.now()) {
+      token = j.token;
+      expiresAt = j.expiresAt;
+    }
+  }
+} catch {
+  /* ignore */
+}
+
+function persist() {
+  try {
+    if (token) localStorage.setItem(LS_AUTH, JSON.stringify({ token, expiresAt }));
+    else localStorage.removeItem(LS_AUTH);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function hasClientId(): boolean {
   return !!CLIENT_ID;
+}
+
+/** 전에 로그인한 적이 있는가 (자동 로그인 시도 여부). */
+export function hasSession(): boolean {
+  try {
+    return localStorage.getItem(LS_AUTH) !== null;
+  } catch {
+    return false;
+  }
 }
 
 function loadGis(): Promise<void> {
@@ -61,41 +99,50 @@ async function ensureClient(): Promise<TokenClient> {
   if (client) return client;
   if (!CLIENT_ID) throw new Error("VITE_GOOGLE_CLIENT_ID가 없습니다 (.env 확인)");
   await loadGis();
-  client = window.google!.accounts.oauth2.initTokenClient({
-    client_id: CLIENT_ID,
-    scope: SCOPE,
-    callback: () => {},
-  });
+  client = window.google!.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPE, callback: () => {} });
   return client;
 }
 
 /**
- * 토큰을 요청한다. prompt=''는 이미 동의한 사용자에게 팝업을 최소화한다.
- * 첫 로그인은 prompt='consent' 대신 기본값(빈 문자열)으로 두면 구글이 알아서 동의 화면을 띄운다.
+ * 토큰 요청. interactive=false면 prompt:'none' — 동의한 적 있고 구글 세션이 살아 있으면 팝업 없이 받는다.
+ * 실패하면 reject (호출 쪽에서 interactive로 다시 시도하거나 로그인 버튼을 보여 준다).
  */
-export function requestToken(interactive = true): Promise<string> {
+export function requestToken(interactive: boolean): Promise<string> {
   return ensureClient().then(
     (c) =>
       new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const done = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          fn();
+        };
         c.callback = (r) => {
           if (r.error || !r.access_token) {
-            reject(new Error(r.error_description ?? r.error ?? "토큰 발급 실패"));
+            done(() => reject(new Error(r.error_description ?? r.error ?? "토큰 발급 실패")));
             return;
           }
           token = r.access_token;
-          // 만료 60초 전부터 갱신 대상으로 본다.
           expiresAt = Date.now() + ((r.expires_in ?? 3600) - 60) * 1000;
-          resolve(token);
+          persist();
+          done(() => resolve(token!));
         };
+        c.error_callback = (e) => done(() => reject(new Error(e.message ?? e.type)));
+        // 조용한 요청이 아무 응답 없이 끝나는 경우(팝업 차단 등)를 대비한 타임아웃
+        if (!interactive) setTimeout(() => done(() => reject(new Error("silent_timeout"))), 8000);
         c.requestAccessToken({ prompt: interactive ? "" : "none" });
       }),
   );
 }
 
-/** 유효한 토큰이 있으면 그대로, 없으면 새로 요청. */
+/** 유효한 토큰이 있으면 그대로, 없으면 조용히 갱신, 그것도 안 되면 팝업. */
 export async function getToken(): Promise<string> {
   if (token && Date.now() < expiresAt) return token;
-  return requestToken(true);
+  try {
+    return await requestToken(false);
+  } catch {
+    return requestToken(true);
+  }
 }
 
 export function isSignedIn(): boolean {
@@ -105,6 +152,7 @@ export function isSignedIn(): boolean {
 export function dropToken(): void {
   token = null;
   expiresAt = 0;
+  persist();
 }
 
 export async function signOut(): Promise<void> {

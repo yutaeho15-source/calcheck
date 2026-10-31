@@ -4,7 +4,7 @@ import type { ISODate } from "../model/dates";
 import { formatKoDate, todayKST } from "../model/dates";
 import type { ClassDef, ClassStatus } from "../model/timetable";
 import { DAY_KO, STATUS_LABEL, defKey, formatTimetableText, parseTimetableText } from "../model/timetable";
-import { addOneOffClass, deleteOneOff, setClassStatusOn, setSemester, syncTimetable, useStore } from "../store";
+import { addOneOffClass, deleteOneOff, selectExceptions, setClassStatusOn, setSemester, saveTimetable, useStore } from "../store";
 import { Plus, Trash } from "../ui/Icons";
 
 const EXAMPLE = `객체지향프로그래밍 | 월 09:00-10:15, 수 09:00-10:15 | 공학관 301
@@ -14,17 +14,16 @@ const STATUSES: ClassStatus[] = ["cancelled", "exam", "online", "assignment", "n
 
 export default function Timetable() {
   const s = useStore();
-  const [defs, setDefs] = useState<ClassDef[]>(s.classes);
+  const [defs, setDefs] = useState<ClassDef[]>(s.data.classes);
   const [dirty, setDirty] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasteErrors, setPasteErrors] = useState<string[]>([]);
   const [result, setResult] = useState<string | null>(null);
 
-  // 캘린더에서 다시 읽어 오면 편집 중이 아닐 때만 덮어쓴다
   useEffect(() => {
-    if (!dirty) setDefs(s.classes);
-  }, [s.classes, dirty]);
+    if (!dirty) setDefs(s.data.classes);
+  }, [s.data.classes, dirty]);
 
   const sorted = useMemo(() => [...defs].sort((a, b) => a.day - b.day || a.start.localeCompare(b.start)), [defs]);
 
@@ -44,22 +43,18 @@ export default function Timetable() {
     const { defs: parsed, errors } = parseTimetableText(pasteText);
     setPasteErrors(errors);
     if (parsed.length > 0 && errors.length === 0) {
-      // 같은 키는 기존 ID를 이어받아 "변경 없음"으로 인식되게
-      const byKey = new Map(defs.map((d) => [defKey(d), d]));
-      setDefs(parsed.map((d) => ({ ...d, id: byKey.get(defKey(d))?.id })));
+      setDefs(parsed);
       setDirty(true);
       setPasteOpen(false);
       setPasteText("");
     }
   };
-  const save = async () => {
+  const save = () => {
     const clean = defs.filter((d) => d.title.trim() && d.start < d.end);
-    const r = await syncTimetable(clean);
-    if (r) {
-      setDirty(false);
-      setResult(`반영 완료 — 추가 ${r.added}, 유지 ${r.kept}, 삭제 ${r.removed}`);
-      setTimeout(() => setResult(null), 4000);
-    }
+    saveTimetable(clean);
+    setDirty(false);
+    setResult(`저장했어요 — ${clean.length}개 수업`);
+    setTimeout(() => setResult(null), 3000);
   };
 
   // ---- 회차 상태 폼 ----
@@ -71,39 +66,34 @@ export default function Timetable() {
   const [mkEnd, setMkEnd] = useState("10:15");
   const [mkRoom, setMkRoom] = useState("");
   const [busy, setBusy] = useState(false);
-  const classesById = useMemo(() => new Map(s.classes.filter((c) => c.id).map((c) => [c.id!, c])), [s.classes]);
-
-  const applyStatus = async () => {
+  const applyStatus = () => {
     setBusy(true);
-    if (fStatus === "makeup") {
-      await addOneOffClass(mkTitle.trim() || "보강", fDate, mkStart, mkEnd, "makeup", mkRoom.trim() || undefined);
-    } else {
-      const def = classesById.get(fDef);
-      if (def) await setClassStatusOn(def, fDate, fStatus);
-    }
+    if (fStatus === "makeup") addOneOffClass(mkTitle.trim() || "보강", fDate, mkStart, mkEnd, "makeup", mkRoom.trim() || undefined);
+    else if (fDef) setClassStatusOn(fDef, fDate, fStatus);
     setBusy(false);
   };
 
   // 선택한 날짜의 요일에 있는 수업만 고를 수 있게
   const dayOf = new Date(fDate + "T00:00:00Z").getUTCDay();
-  const candidates = s.classes.filter((c) => c.id && c.day === dayOf);
+  const candidates = s.data.classes.filter((c) => c.day === dayOf);
   useEffect(() => {
-    if (!candidates.some((c) => c.id === fDef)) setFDef(candidates[0]?.id ?? "");
-  }, [fDate, s.classes]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!candidates.some((c) => defKey(c) === fDef)) setFDef(candidates[0] ? defKey(candidates[0]) : "");
+  }, [fDate, s.data.classes]); // eslint-disable-line react-hooks/exhaustive-deps
+  const exceptions = useMemo(() => selectExceptions(s), [s]);
 
   return (
     <>
       <section>
         <h2>학기 기간</h2>
-        <p className="hint">수업은 이 기간 안에서만 매주 반복돼요. 기간을 바꾼 뒤엔 "캘린더에 반영"을 다시 눌러야 해요.</p>
+        <p className="hint">수업은 이 기간 안에서만 매주 반복돼요.</p>
         <div className="row">
           <label className="field">
             <span>시작</span>
-            <input type="date" value={s.semester.start} onChange={(e) => setSemester({ ...s.semester, start: e.target.value })} />
+            <input type="date" value={s.data.semester.start} onChange={(e) => setSemester({ ...s.data.semester, start: e.target.value })} />
           </label>
           <label className="field">
             <span>끝</span>
-            <input type="date" value={s.semester.end} min={s.semester.start} onChange={(e) => setSemester({ ...s.semester, end: e.target.value })} />
+            <input type="date" value={s.data.semester.end} min={s.data.semester.start} onChange={(e) => setSemester({ ...s.data.semester, end: e.target.value })} />
           </label>
         </div>
       </section>
@@ -113,7 +103,7 @@ export default function Timetable() {
           시간표 <span className="count">{sorted.length}개 수업</span>
         </h2>
         <p className="hint">
-          에브리타임 시간표 캡처를 Claude에게 보내면 아래 형식의 텍스트로 바꿔 줘요. 그걸 "텍스트로 붙여넣기"에 넣으면 끝. 직접 한 줄씩 고쳐도 돼요.
+          시간표 캡처를 Claude에게 보내면 아래 형식의 텍스트로 바꿔 줘요. 그걸 "텍스트로 붙여넣기"에 넣으면 끝. 수업은 이 기기에만 저장되고 구글 캘린더에는 올라가지 않아요.
         </p>
 
         {sorted.length === 0 && !pasteOpen && (
@@ -126,7 +116,7 @@ export default function Timetable() {
           {sorted.map((d) => {
             const i = defs.indexOf(d);
             return (
-              <li key={d.id ?? `new-${i}`} className="tt-row">
+              <li key={i} className="tt-row">
                 <input className="tt-title" value={d.title} placeholder="과목명" onChange={(e) => edit(i, { title: e.target.value })} aria-label="과목명" />
                 <select value={d.day} onChange={(e) => edit(i, { day: Number(e.target.value) })} aria-label="요일">
                   {[1, 2, 3, 4, 5, 6, 0].map((w) => (
@@ -155,8 +145,8 @@ export default function Timetable() {
             텍스트로 붙여넣기
           </button>
           <span style={{ flex: 1 }} />
-          <button className="small primary" onClick={() => void save()} disabled={!dirty || s.loading}>
-            {s.loading ? "반영 중…" : "캘린더에 반영"}
+          <button className="small primary" onClick={save} disabled={!dirty}>
+            저장
           </button>
         </div>
         {result && <p className="hint ok">{result}</p>}
@@ -185,7 +175,7 @@ export default function Timetable() {
             </div>
           </div>
         )}
-        {dirty && <p className="hint warn">아직 캘린더에 반영 안 된 변경이 있어요.</p>}
+        {dirty && <p className="hint warn">아직 저장 안 된 변경이 있어요.</p>}
       </section>
 
       <section>
@@ -214,7 +204,7 @@ export default function Timetable() {
               <span>과목명</span>
               <input value={mkTitle} onChange={(e) => setMkTitle(e.target.value)} placeholder="보강할 과목" list="class-names" />
               <datalist id="class-names">
-                {[...new Set(s.classes.map((c) => c.title))].map((t) => (
+                {[...new Set(s.data.classes.map((c) => c.title))].map((t) => (
                   <option key={t} value={t} />
                 ))}
               </datalist>
@@ -240,33 +230,33 @@ export default function Timetable() {
             {candidates.length > 0 ? (
               <select value={fDef} onChange={(e) => setFDef(e.target.value)}>
                 {candidates.map((c) => (
-                  <option key={c.id} value={c.id}>
+                  <option key={defKey(c)} value={defKey(c)}>
                     {c.start} {c.title}
                   </option>
                 ))}
               </select>
             ) : (
               <p className="hint" style={{ margin: "4px 0 0" }}>
-                이 요일엔 반영된 수업이 없어요.
+                이 요일엔 저장된 수업이 없어요.
               </p>
             )}
           </label>
         )}
         <div className="tt-actions">
           <span style={{ flex: 1 }} />
-          <button className="small primary" onClick={() => void applyStatus()} disabled={busy || (fStatus !== "makeup" && !fDef) || (fStatus === "makeup" && mkStart >= mkEnd)}>
+          <button className="small primary" onClick={applyStatus} disabled={busy || (fStatus !== "makeup" && !fDef) || (fStatus === "makeup" && mkStart >= mkEnd)}>
             {busy ? "적용 중…" : "적용"}
           </button>
         </div>
 
         <h3 className="sub">
-          이번 학기 예외 <span className="count">{s.exceptions.length}</span>
+          이번 학기 예외 <span className="count">{exceptions.length}</span>
         </h3>
-        {s.exceptions.length === 0 ? (
+        {exceptions.length === 0 ? (
           <p className="empty">정상이 아닌 회차가 없어요.</p>
         ) : (
           <ul className="list">
-            {s.exceptions.map((e) => (
+            {exceptions.map((e) => (
               <li key={e.id} className="row static">
                 <span className="time">{formatKoDate(e.date)}</span>
                 <span className="text">
@@ -274,18 +264,12 @@ export default function Timetable() {
                   <span className={`tag st-${e.klass!.status}`}>{STATUS_LABEL[e.klass!.status]}</span>
                   <span className="muted small"> {e.startTime}–{e.endTime}</span>
                 </span>
-                {e.klass!.masterId ? (
-                  <button
-                    className="small ghost"
-                    onClick={() => {
-                      const def = classesById.get(e.klass!.masterId!);
-                      if (def) void setClassStatusOn(def, e.date, "normal");
-                    }}
-                  >
+                {e.klass!.defKey ? (
+                  <button className="small ghost" onClick={() => setClassStatusOn(e.klass!.defKey!, e.date, "normal")}>
                     정상으로
                   </button>
                 ) : (
-                  <button className="small ghost" onClick={() => void deleteOneOff(e)} aria-label="삭제">
+                  <button className="small ghost" onClick={() => deleteOneOff(e)} aria-label="삭제">
                     <Trash size={16} />
                   </button>
                 )}

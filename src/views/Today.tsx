@@ -32,12 +32,12 @@ export default function Today({ onOpenSheet }: { onOpenSheet: (s: SheetState) =>
     .sort((a, b) => Number(b.allDay) - Number(a.allDay) || (a.startTime ?? "").localeCompare(b.startTime ?? ""));
 
   const load = dayLoad(date, selectChecks(s), selectGoals(s), today);
-  const cap = dayCap(date, s.settings, selectExt(s));
+  const cap = dayCap(date, s.data.settings, selectExt(s));
   const level = loadLevel(load, cap);
   const total = ext.length + checks.length + goals.length;
   const doneCount = ext.filter((e) => e.done).length + checks.filter((c) => c.done).length + goals.filter((g) => quota(g, date) === 0).length;
   const isToday = date === today;
-  const firstLoad = s.loading && Object.keys(s.items).length === 0;
+  const firstLoad = s.loading && Object.keys(s.ext).length === 0 && s.data.checks.length === 0;
 
   // 좌우 스와이프로 어제·내일
   const touch = useRef<{ x: number; y: number } | null>(null);

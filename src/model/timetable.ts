@@ -1,15 +1,15 @@
-// 시간표 모델. 수업 하나 = "시간표" 캘린더의 주간 반복 이벤트(master) 하나.
-// 휴강·시험 같은 상태는 그날 인스턴스의 private 속성과 제목 접두어로만 표시한다 — 원본은 여전히 캘린더다.
+// 시간표 모델. 수업은 캘린더가 아니라 기기에 저장되고, 날짜 범위를 달라고 하면 그 자리에서 회차를 만들어 낸다.
+// 휴강·시험 같은 상태는 `${defKey}|${date}` 키로 따로 저장된다.
 
 import type { ISODate } from "./dates";
-import { addDays, weekday } from "./dates";
+import { addDays, daysBetween, weekday } from "./dates";
+import type { ExtEvent } from "./items";
+import { TIMETABLE_CAL } from "./items";
+import type { OneOffClass } from "./local";
 
 export const DAY_KO = ["일", "월", "화", "수", "목", "금", "토"] as const;
-const DAY_RRULE = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"] as const;
 
 export interface ClassDef {
-  /** master 이벤트 ID. 아직 캘린더에 없으면 undefined */
-  id?: string;
   title: string;
   day: number; // 0=일 … 6=토
   start: string; // 'HH:MM'
@@ -27,68 +27,71 @@ export const STATUS_LABEL: Record<ClassStatus, string> = {
   assignment: "과제 마감",
   makeup: "보강",
 };
-/** 인스턴스 제목 접두어. 위젯에서 바로 읽히도록 */
-const STATUS_PREFIX: Partial<Record<ClassStatus, string>> = {
-  cancelled: "휴강",
-  exam: "시험",
-  online: "온라인",
-  assignment: "과제",
-  makeup: "보강",
-};
-const PREFIX_RE = /^(휴강|시험|온라인|과제|보강)\s*·\s*/;
-
-export function classTitle(base: string, status: ClassStatus): string {
-  const p = STATUS_PREFIX[status];
-  return p ? `${p} · ${base}` : base;
-}
-export function stripClassTitle(summary: string): string {
-  return summary.replace(PREFIX_RE, "").trim();
-}
 
 /** 같은 수업인지 판단하는 키. 제목+요일+시작시각. */
 export function defKey(d: Pick<ClassDef, "title" | "day" | "start">): string {
   return `${d.title.trim()}|${d.day}|${d.start}`;
 }
 
-/** 학기 시작일 이후 첫 해당 요일 */
-export function firstOccurrence(semStart: ISODate, day: number): ISODate {
-  const w = weekday(semStart);
-  return addDays(semStart, (day - w + 7) % 7);
-}
+export const statusKey = (k: string, date: ISODate) => `${k}|${date}`;
 
-/** 학기 끝(포함)을 UNTIL로. KST 23:59:59 → UTC 14:59:59 */
-function untilUtc(semEnd: ISODate): string {
-  return `${semEnd.replace(/-/g, "")}T145959Z`;
-}
-
-export function classMasterBody(d: ClassDef, semStart: ISODate, semEnd: ISODate) {
-  const first = firstOccurrence(semStart, d.day);
-  return {
-    summary: d.title.trim(),
-    location: d.room?.trim() || undefined,
-    start: { dateTime: `${first}T${d.start}:00`, timeZone: "Asia/Seoul" },
-    end: { dateTime: `${first}T${d.end}:00`, timeZone: "Asia/Seoul" },
-    recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${DAY_RRULE[d.day]};UNTIL=${untilUtc(semEnd)}`],
-    extendedProperties: { private: { app: "cc", v: "1", kind: "class", key: defKey(d) } },
-    reminders: { useDefault: false },
-  };
-}
-
-/** 보강처럼 하루짜리 수업 이벤트 */
-export function oneOffClassBody(title: string, date: ISODate, start: string, end: string, status: ClassStatus, room?: string) {
-  return {
-    summary: classTitle(title, status),
-    location: room || undefined,
-    start: { dateTime: `${date}T${start}:00`, timeZone: "Asia/Seoul" },
-    end: { dateTime: `${date}T${end}:00`, timeZone: "Asia/Seoul" },
-    extendedProperties: { private: { app: "cc", v: "1", kind: "class", status, flag: status === "normal" ? "0" : "1", oneoff: "1" } },
-    reminders: { useDefault: false },
-  };
+/** [from, to) 범위의 수업 회차를 만든다. 학기 밖은 제외. */
+export function classInstances(
+  defs: ClassDef[],
+  oneOffs: OneOffClass[],
+  semester: { start: ISODate; end: ISODate },
+  from: ISODate,
+  to: ISODate,
+  classStatus: Record<string, ClassStatus>,
+  extDone: Record<string, true>,
+): ExtEvent[] {
+  const out: ExtEvent[] = [];
+  const lo = from > semester.start ? from : semester.start;
+  const hi = addDays(semester.end, 1) < to ? addDays(semester.end, 1) : to;
+  const n = daysBetween(lo, hi);
+  for (let i = 0; i < n; i++) {
+    const d = addDays(lo, i);
+    const w = weekday(d);
+    for (const def of defs) {
+      if (def.day !== w) continue;
+      const k = defKey(def);
+      const id = `${k}|${d}`;
+      out.push({
+        kind: "ext",
+        id,
+        calendarId: TIMETABLE_CAL,
+        calendarName: "시간표",
+        title: def.title,
+        date: d,
+        allDay: false,
+        startTime: def.start,
+        endTime: def.end,
+        done: !!extDone[`${TIMETABLE_CAL}|${id}`],
+        klass: { defKey: k, status: classStatus[statusKey(k, d)] ?? "normal", room: def.room },
+      });
+    }
+  }
+  for (const o of oneOffs) {
+    if (o.date < from || o.date >= to) continue;
+    out.push({
+      kind: "ext",
+      id: `oneoff|${o.id}`,
+      calendarId: TIMETABLE_CAL,
+      calendarName: "시간표",
+      title: o.title,
+      date: o.date,
+      allDay: false,
+      startTime: o.start,
+      endTime: o.end,
+      done: !!extDone[`${TIMETABLE_CAL}|oneoff|${o.id}`],
+      klass: { oneOffId: o.id, status: o.status, room: o.room },
+    });
+  }
+  return out;
 }
 
 // ---- 텍스트 ↔ 시간표 ----
 // 한 줄에 수업 하나:  과목명 | 월 09:00-10:15, 수 09:00-10:15 | 강의실
-// 요일이 여러 개면 수업도 여러 개(요일별 master)로 만든다.
 
 const TIME_RE = /([월화수목금토일])\s*(\d{1,2}):(\d{2})\s*[-~–]\s*(\d{1,2}):(\d{2})/g;
 
@@ -119,7 +122,6 @@ export function parseTimetableText(text: string): { defs: ClassDef[]; errors: st
 }
 
 export function formatTimetableText(defs: ClassDef[]): string {
-  // 같은 과목·강의실은 한 줄로 묶는다
   const groups = new Map<string, { title: string; room?: string; times: string[] }>();
   for (const d of [...defs].sort((a, b) => a.day - b.day || a.start.localeCompare(b.start))) {
     const k = `${d.title}|${d.room ?? ""}`;

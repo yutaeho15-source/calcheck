@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classMasterBody, classTitle, firstOccurrence, formatTimetableText, parseTimetableText, stripClassTitle } from "./timetable";
+import { classInstances, defKey, formatTimetableText, parseTimetableText, statusKey } from "./timetable";
 
 describe("parseTimetableText", () => {
   it("한 줄에 요일 여러 개 → 요일별 수업", () => {
@@ -28,21 +28,24 @@ describe("parseTimetableText", () => {
   });
 });
 
-describe("master body", () => {
-  it("학기 시작일 이후 첫 해당 요일에서 시작, UNTIL은 KST 자정 → UTC", () => {
-    expect(firstOccurrence("2026-09-01", 1)).toBe("2026-09-07"); // 9/1 화 → 다음 월
-    expect(firstOccurrence("2026-09-01", 2)).toBe("2026-09-01");
-    const b = classMasterBody({ title: "AI", day: 4, start: "11:00", end: "12:15" }, "2026-09-01", "2026-12-19");
-    expect(b.start).toEqual({ dateTime: "2026-09-03T11:00:00", timeZone: "Asia/Seoul" });
-    expect(b.recurrence).toEqual(["RRULE:FREQ=WEEKLY;BYDAY=TH;UNTIL=20261219T145959Z"]);
+describe("classInstances", () => {
+  const defs = [{ title: "AI", day: 4, start: "11:00", end: "12:15", room: "IT관 204" }]; // 목
+  const sem = { start: "2026-09-01", end: "2026-12-19" };
+  it("범위 안의 해당 요일마다 회차가 생기고, 학기 밖은 제외", () => {
+    const out = classInstances(defs, [], sem, "2026-10-26", "2026-11-09", {}, {});
+    expect(out.map((e) => e.date)).toEqual(["2026-10-29", "2026-11-05"]);
+    expect(out[0]).toMatchObject({ title: "AI", startTime: "11:00", endTime: "12:15", klass: { status: "normal", room: "IT관 204" } });
+    expect(classInstances(defs, [], sem, "2026-12-21", "2026-12-28", {}, {})).toEqual([]);
   });
-});
-
-describe("class title", () => {
-  it("접두어 붙이고 떼기", () => {
-    expect(classTitle("인공지능", "cancelled")).toBe("휴강 · 인공지능");
-    expect(classTitle("인공지능", "normal")).toBe("인공지능");
-    expect(stripClassTitle("시험 · 인공지능")).toBe("인공지능");
-    expect(stripClassTitle("인공지능")).toBe("인공지능");
+  it("상태와 완료 표시는 키로 붙는다", () => {
+    const k = defKey(defs[0]);
+    const out = classInstances(defs, [], sem, "2026-10-26", "2026-11-02", { [statusKey(k, "2026-10-29")]: "exam" }, { [`timetable|${k}|2026-10-29`]: true });
+    expect(out[0].klass?.status).toBe("exam");
+    expect(out[0].done).toBe(true);
+  });
+  it("보강(일회성)은 날짜가 맞으면 들어간다", () => {
+    const out = classInstances([], [{ id: "o1", title: "AI 보강", date: "2026-10-30", start: "18:00", end: "19:00", status: "makeup" }], sem, "2026-10-26", "2026-11-02", {}, {});
+    expect(out).toHaveLength(1);
+    expect(out[0].klass).toMatchObject({ oneOffId: "o1", status: "makeup" });
   });
 });

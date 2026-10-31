@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { addDays, daysBetween, startOfWeek, todayKST } from "./dates";
-import { formatTitle, fromEvent, goalPercent, stripTitle } from "./items";
+import { fromEvent, goalPercent } from "./items";
 import type { CheckItem, Goal } from "./items";
 import { DEFAULT_SETTINGS, dayCap, dayLoad, loadLevel, quota, rolloverCandidates } from "./plan";
 
 const goal = (over: Partial<Goal> = {}): Goal => ({
   kind: "goal",
   id: "g1",
-  calendarId: "app",
   title: "족보 풀기",
   start: "2026-10-29",
   due: "2026-11-02",
@@ -61,9 +60,9 @@ describe("quota — 스펙 4절 예시 표", () => {
 
 describe("dayLoad / dayCap", () => {
   const checks: CheckItem[] = [
-    { kind: "check", id: "c1", calendarId: "app", title: "a", date: "2026-10-29", done: false, rolled: 0 },
-    { kind: "check", id: "c2", calendarId: "app", title: "b", date: "2026-10-29", done: true, rolled: 0 },
-    { kind: "check", id: "c3", calendarId: "app", title: "c", date: "2026-10-30", done: false, rolled: 0 },
+    { kind: "check", id: "c1", title: "a", date: "2026-10-29", done: false, rolled: 0 },
+    { kind: "check", id: "c2", title: "b", date: "2026-10-29", done: true, rolled: 0 },
+    { kind: "check", id: "c3", title: "c", date: "2026-10-30", done: false, rolled: 0 },
   ];
   it("체크 항목 수 + 목표 몫 합", () => {
     expect(dayLoad("2026-10-29", checks, [goal()], "2026-10-29")).toBe(2 + 10);
@@ -100,54 +99,31 @@ describe("dayLoad / dayCap", () => {
 describe("rollover", () => {
   it("오늘보다 앞선 미완 체크 항목만", () => {
     const checks: CheckItem[] = [
-      { kind: "check", id: "c1", calendarId: "app", title: "a", date: "2026-10-28", done: false, rolled: 0 },
-      { kind: "check", id: "c2", calendarId: "app", title: "b", date: "2026-10-28", done: true, rolled: 0 },
-      { kind: "check", id: "c3", calendarId: "app", title: "c", date: "2026-10-29", done: false, rolled: 0 },
+      { kind: "check", id: "c1", title: "a", date: "2026-10-28", done: false, rolled: 0 },
+      { kind: "check", id: "c2", title: "b", date: "2026-10-28", done: true, rolled: 0 },
+      { kind: "check", id: "c3", title: "c", date: "2026-10-29", done: false, rolled: 0 },
     ];
     expect(rolloverCandidates(checks, "2026-10-29").map((c) => c.id)).toEqual(["c1"]);
   });
 });
 
-describe("title format", () => {
-  it("체크·목표 제목", () => {
-    expect(formatTitle({ kind: "check", id: "", calendarId: "", title: "보고서 초안", date: "2026-10-29", done: false, rolled: 0 })).toBe("☐ 보고서 초안");
-    expect(formatTitle(goal({ current: 23 }))).toBe("◐ 족보 풀기 23/50 · 46%");
-    expect(formatTitle(goal({ current: 31 }), "2026-11-05")).toBe("◐! 족보 풀기 31/50 · 62%");
-    expect(formatTitle(goal({ current: 50, done: true }))).toBe("● 족보 풀기 50/50");
-  });
-  it("접두어·꼬리를 떼면 사용자 제목만 남는다", () => {
-    expect(stripTitle("◐ 족보 풀기 23/50 · 46%")).toBe("족보 풀기");
-    expect(stripTitle("◐! 족보 풀기 31/50 · 62%")).toBe("족보 풀기");
-    expect(stripTitle("☑ 보고서 초안")).toBe("보고서 초안");
-    expect(stripTitle("그냥 제목")).toBe("그냥 제목");
-  });
-  it("goalPercent", () => {
+describe("goalPercent", () => {
+  it("비율", () => {
     expect(goalPercent({ target: 50, current: 23 })).toBe(46);
     expect(goalPercent({ target: 0, current: 0 })).toBe(0);
   });
 });
 
 describe("fromEvent", () => {
-  it("앱 캘린더의 속성 없는 이벤트는 체크 항목으로 (사용자가 위젯에서 직접 만든 경우)", () => {
-    const it_ = fromEvent({ id: "x", summary: "우유 사기", start: { date: "2026-10-29" }, end: { date: "2026-10-30" } }, "app", "app");
-    expect(it_?.kind).toBe("check");
-    expect((it_ as CheckItem).title).toBe("우유 사기");
-  });
-  it("목표 이벤트는 end(exclusive)에서 마감일을 복원한다", () => {
-    const g = fromEvent(
-      { id: "g", summary: "◐ 족보 풀기 23/50 · 46%", start: { date: "2026-10-29" }, end: { date: "2026-11-03" },
-        extendedProperties: { private: { app: "cc", kind: "goal", target: "50", current: "23", unit: "문제", done: "0" } } },
-      "app", "app",
-    ) as Goal;
-    expect(g.kind).toBe("goal");
-    expect(g.due).toBe("2026-11-02");
-    expect(g.title).toBe("족보 풀기");
-  });
-  it("외부 시간 지정 이벤트는 KST 날짜·시각으로", () => {
+  it("외부 시간 지정 이벤트는 KST 날짜·시각으로, 완료 표시는 로컬 맵에서", () => {
     const e = fromEvent(
       { id: "e", summary: "수업", start: { dateTime: "2026-10-29T09:00:00+09:00" }, end: { dateTime: "2026-10-29T10:15:00+09:00" } },
-      "primary", "app",
+      "primary", "기본", { "primary|e": true },
     );
-    expect(e).toMatchObject({ kind: "ext", date: "2026-10-29", startTime: "09:00", endTime: "10:15", allDay: false });
+    expect(e).toMatchObject({ kind: "ext", date: "2026-10-29", startTime: "09:00", endTime: "10:15", allDay: false, done: true });
+  });
+  it("종일 이벤트와 취소된 이벤트", () => {
+    expect(fromEvent({ id: "a", summary: "x", start: { date: "2026-10-29" }, end: { date: "2026-10-30" } }, "p", undefined, {})).toMatchObject({ allDay: true, date: "2026-10-29", done: false });
+    expect(fromEvent({ id: "b", status: "cancelled", start: { date: "2026-10-29" }, end: { date: "2026-10-30" } }, "p", undefined, {})).toBeNull();
   });
 });

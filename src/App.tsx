@@ -3,7 +3,7 @@ import { hasClientId } from "./auth";
 import type { CheckItem, Goal } from "./model/items";
 import type { ISODate } from "./model/dates";
 import { todayKST } from "./model/dates";
-import { clearError, refresh, signIn, useStore } from "./store";
+import { boot, clearError, refresh, signIn, useStore } from "./store";
 import { Mark, MonthIcon, Plus, SettingsIcon, TodayIcon, WeekIcon } from "./ui/Icons";
 import EditSheet from "./views/EditSheet";
 import Month from "./views/Month";
@@ -19,7 +19,12 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("today");
   const [sheet, setSheet] = useState<SheetState>(null);
 
-  // 포그라운드로 돌아올 때 다시 읽는다 — 위젯에서 바꾼 것이 여기서 반영된다 (스펙 6절 갱신 시점).
+  // 시작: 저장된 세션이 있으면 조용히 자동 로그인.
+  useEffect(() => {
+    void boot();
+  }, []);
+
+  // 포그라운드로 돌아올 때 다시 읽는다 — 캘린더에서 바뀐 일정이 여기서 반영된다.
   useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "visible" && s.signedIn) void refresh();
@@ -28,12 +33,21 @@ export default function App() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [s.signedIn]);
 
+  if (s.booting) {
+    return (
+      <div className="screen center">
+        <Mark className="mark" size={64} />
+        <p className="muted">로그인 중…</p>
+      </div>
+    );
+  }
+
   if (!s.signedIn) {
     return (
       <div className="screen center">
         <Mark className="mark" size={64} />
         <h1>CalCheck</h1>
-        <p className="muted">구글 캘린더를 그대로 원본으로 쓰는 체크리스트. 오늘 일정을 체크하고, 쌓인 일을 회차로 나눠요.</p>
+        <p className="muted">구글 캘린더의 일정을 읽어 와 체크하고, 쌓인 일을 회차로 나눠요. 앱에서 쓴 내용은 캘린더에 올라가지 않아요.</p>
         {hasClientId() ? (
           <button className="primary" onClick={() => void signIn()} disabled={s.loading}>
             {s.loading ? "로그인 중…" : "Google로 로그인"}

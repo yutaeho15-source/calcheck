@@ -1,5 +1,5 @@
-// Calendar API v3 래퍼 (스펙 6절). 클라이언트 라이브러리 없이 fetch로 8개 호출만.
-// 모든 호출은 "읽고 → 바꾸고 → patch". 앱은 캐시를 원본으로 삼지 않는다.
+// Calendar API v3 래퍼 — 읽기 전용. calendarList와 events.list 둘뿐이다.
+// 쓰기 함수는 일부러 없다. 앱이 만든 것은 model/local.ts로 기기에만 저장된다.
 
 import { dropToken, getToken, requestToken } from "../auth";
 import type { ISODate } from "../model/dates";
@@ -71,18 +71,9 @@ export async function listCalendars(): Promise<CalendarEntry[]> {
   return r.items ?? [];
 }
 
-export async function insertCalendar(summary: string): Promise<CalendarEntry> {
-  const r = await call<{ id: string; summary: string }>("/calendars", {
-    method: "POST",
-    body: JSON.stringify({ summary, timeZone: "Asia/Seoul" }),
-  });
-  return { id: r.id, summary: r.summary, accessRole: "owner" };
-}
-
 // ---- events ----
 
 const EVENT_FIELDS = "nextPageToken,items(id,etag,summary,status,location,start,end,recurrence,recurringEventId,extendedProperties,organizer/displayName)";
-const ONE_FIELDS = "id,etag,summary,status,location,start,end,recurrence,recurringEventId,extendedProperties";
 
 /** [from, to) 날짜 범위의 이벤트. 반복 이벤트는 인스턴스로 펼친다(singleEvents). 페이지는 전부 따라간다. */
 export async function listEvents(
@@ -111,47 +102,4 @@ export async function listEvents(
     pageToken = r.nextPageToken;
   } while (pageToken);
   return out;
-}
-
-export function insertEvent(calendarId: string, body: unknown): Promise<GEvent> {
-  return call<GEvent>(`/calendars/${encodeURIComponent(calendarId)}/events`, {
-    method: "POST",
-    body: JSON.stringify(body),
-    query: { fields: ONE_FIELDS },
-  });
-}
-
-/** patch는 보낸 필드만 바꾼다. extendedProperties.private도 보낸 키만 갱신되고 나머지는 유지된다. */
-export function patchEvent(calendarId: string, eventId: string, body: unknown): Promise<GEvent> {
-  return call<GEvent>(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, {
-    method: "PATCH",
-    body: JSON.stringify(body),
-    query: { fields: ONE_FIELDS },
-  });
-}
-
-/** 반복 이벤트의 master들만 (singleEvents=false). 시간표 편집기가 쓴다. */
-export async function listMasters(calendarId: string, extra: Record<string, string | string[]> = {}): Promise<GEvent[]> {
-  const out: GEvent[] = [];
-  let pageToken: string | undefined;
-  do {
-    const r = await call<{ items?: GEvent[]; nextPageToken?: string }>(`/calendars/${encodeURIComponent(calendarId)}/events`, {
-      query: { singleEvents: "false", maxResults: "250", fields: EVENT_FIELDS, showDeleted: "false", ...extra, ...(pageToken ? { pageToken } : {}) },
-    });
-    out.push(...(r.items ?? []).filter((e) => e.status !== "cancelled"));
-    pageToken = r.nextPageToken;
-  } while (pageToken);
-  return out;
-}
-
-/** 특정 반복 이벤트의 [from, to) 인스턴스. 예외 인스턴스도 포함된다. */
-export async function listInstances(calendarId: string, masterId: string, from: ISODate, to: ISODate): Promise<GEvent[]> {
-  const r = await call<{ items?: GEvent[] }>(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(masterId)}/instances`, {
-    query: { timeMin: kstMidnightRfc3339(from), timeMax: kstMidnightRfc3339(to), timeZone: "Asia/Seoul", fields: EVENT_FIELDS },
-  });
-  return (r.items ?? []).filter((e) => e.status !== "cancelled");
-}
-
-export function deleteEvent(calendarId: string, eventId: string): Promise<void> {
-  return call<void>(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, { method: "DELETE" });
 }

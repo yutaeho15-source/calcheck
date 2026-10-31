@@ -44,7 +44,7 @@ export default function Month({ onOpenSheet }: { onOpenSheet: (s: SheetState) =>
     const d = addDays(gridStart, i);
     const inMonth = d >= month && d < nextMonth;
     const load = dayLoad(d, checks, goals, today);
-    const cap = dayCap(d, s.settings, ext);
+    const cap = dayCap(d, s.data.settings, ext);
     const level = loadLevel(load, cap);
     const nChecks = checks.filter((c) => c.date === d).length;
     const nGoals = goals.filter((g) => isGoalAlive(g, d, today)).length;

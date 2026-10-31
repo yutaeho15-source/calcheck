@@ -25,7 +25,7 @@ export default function Week({ onOpenSheet }: { onOpenSheet: (s: SheetState) => 
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   const rows = days.map((d) => {
     const load = dayLoad(d, checks, goals, today);
-    const cap = dayCap(d, s.settings, ext);
+    const cap = dayCap(d, s.data.settings, ext);
     return { d, load, cap, level: loadLevel(load, cap) };
   });
   const maxV = Math.max(1, ...rows.map((r) => Math.max(r.load, r.cap)));

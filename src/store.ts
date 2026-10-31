@@ -1,115 +1,60 @@
-// 앱 상태. 영속 저장은 설정·선택 캘린더·앱 캘린더 ID뿐이고 항목은 캐시다 — 캘린더가 원본.
+// 앱 상태.
+// 구글 캘린더는 읽기 전용 입력이다. 앱이 만드는 것(체크·목표·시간표·수업 상태·완료 표시)은 전부 기기(localStorage)에 저장된다.
 // 외부 의존 없이 useSyncExternalStore로 만든 작은 스토어.
 
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import type { CalendarEntry } from "./api";
-import { MOCK_APP_ID, MOCK_TT_ID, mockItems } from "./api/mock";
 import * as auth from "./auth";
 import type { ISODate } from "./model/dates";
 import { addDays, startOfWeek, todayKST } from "./model/dates";
-import type { CheckItem, ExtEvent, Goal, Item } from "./model/items";
-import { checkEventBody, classStatusBody, extDoneBody, fromEvent, goalEventBody } from "./model/items";
-import type { ClassDef, ClassStatus } from "./model/timetable";
-import { classMasterBody, defKey, oneOffClassBody, stripClassTitle } from "./model/timetable";
+import type { CheckItem, ExtEvent, Goal } from "./model/items";
+import { TIMETABLE_CAL, extKey, fromEvent } from "./model/items";
+import type { LocalData, OneOffClass } from "./model/local";
+import { emptyData, exportJson, importJson, loadData, newId, saveData } from "./model/local";
 import type { Settings } from "./model/plan";
 import { DEFAULT_SETTINGS, rolloverCandidates } from "./model/plan";
+import type { ClassDef, ClassStatus } from "./model/timetable";
+import { classInstances, statusKey } from "./model/timetable";
 
 export interface State {
   signedIn: boolean;
+  booting: boolean; // 자동 로그인 시도 중
   loading: boolean;
   error: string | null;
   calendars: CalendarEntry[];
-  selectedCalendarIds: string[];
-  appCalendarId: string | null;
-  appCalendarName: string;
-  timetableCalendarId: string | null;
-  semester: { start: ISODate; end: ISODate };
-  classes: ClassDef[]; // 시간표 캘린더의 master 목록 (읽기 캐시)
-  exceptions: ExtEvent[]; // 상태가 정상이 아닌 수업 인스턴스 (학기 범위)
-  settings: Settings;
-  items: Record<string, Item>; // key = `${calendarId}|${id}`
-  window: { from: ISODate; to: ISODate } | null; // 로드된 범위 [from, to)
-}
-
-const LS_KEY = "calcheck.v1";
-
-interface Persisted {
-  selectedCalendarIds: string[];
-  appCalendarId: string | null;
-  appCalendarName: string;
-  timetableCalendarId: string | null;
-  semester: { start: ISODate; end: ISODate };
-  settings: Settings;
+  data: LocalData;
+  /** 구글에서 읽어 온 외부 일정 (캐시). key = `${calendarId}|${id}` */
+  ext: Record<string, ExtEvent>;
+  window: { from: ISODate; to: ISODate } | null;
 }
 
 function defaultSemester(): { start: ISODate; end: ISODate } {
-  // 3~8월이면 1학기(3/1~6/30), 아니면 2학기(9/1~12/31). 설정에서 바꾼다.
   const t = todayKST();
   const y = Number(t.slice(0, 4));
   const m = Number(t.slice(5, 7));
   return m >= 3 && m <= 8 ? { start: `${y}-03-01`, end: `${y}-06-30` } : m >= 9 ? { start: `${y}-09-01`, end: `${y}-12-31` } : { start: `${y - 1}-09-01`, end: `${y}-02-28` };
 }
 
-function loadPersisted(): Persisted {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) {
-      const p = JSON.parse(raw) as Partial<Persisted>;
-      return {
-        selectedCalendarIds: p.selectedCalendarIds ?? [],
-        appCalendarId: p.appCalendarId ?? null,
-        appCalendarName: p.appCalendarName ?? "할 일",
-        timetableCalendarId: p.timetableCalendarId ?? null,
-        semester: p.semester ?? defaultSemester(),
-        settings: { ...DEFAULT_SETTINGS, ...(p.settings ?? {}) },
-      };
-    }
-  } catch {
-    /* ignore */
-  }
-  return { selectedCalendarIds: [], appCalendarId: null, appCalendarName: "할 일", timetableCalendarId: null, semester: defaultSemester(), settings: DEFAULT_SETTINGS };
-}
-
-function savePersisted(s: State) {
-  try {
-    const p: Persisted = {
-      selectedCalendarIds: s.selectedCalendarIds,
-      appCalendarId: s.appCalendarId,
-      appCalendarName: s.appCalendarName,
-      timetableCalendarId: s.timetableCalendarId,
-      semester: s.semester,
-      settings: s.settings,
-    };
-    localStorage.setItem(LS_KEY, JSON.stringify(p));
-  } catch {
-    /* ignore */
-  }
-}
-
-const persisted = loadPersisted();
 let state: State = {
-  signedIn: false,
+  signedIn: auth.isSignedIn(),
+  booting: auth.hasSession() && !auth.isSignedIn(),
   loading: false,
   error: null,
   calendars: [],
-  selectedCalendarIds: persisted.selectedCalendarIds,
-  appCalendarId: persisted.appCalendarId,
-  appCalendarName: persisted.appCalendarName,
-  timetableCalendarId: persisted.timetableCalendarId,
-  semester: persisted.semester,
-  classes: [],
-  exceptions: [],
-  settings: persisted.settings,
-  items: {},
+  data: loadData(emptyData(DEFAULT_SETTINGS, defaultSemester())),
+  ext: {},
   window: null,
 };
 
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
-  savePersisted(state);
+  if (patch.data) saveData(state.data);
   listeners.forEach((l) => l());
+}
+function setData(patch: Partial<LocalData>) {
+  set({ data: { ...state.data, ...patch } });
 }
 
 export function useStore(): State {
@@ -122,32 +67,51 @@ export function useStore(): State {
   );
 }
 
-export const key = (calendarId: string, id: string) => `${calendarId}|${id}`;
-
 // ---- selectors ----
 
-export function selectChecks(s: State): CheckItem[] {
-  return Object.values(s.items).filter((i): i is CheckItem => i.kind === "check");
-}
-export function selectGoals(s: State): Goal[] {
-  return Object.values(s.items).filter((i): i is Goal => i.kind === "goal");
-}
+export const selectChecks = (s: State): CheckItem[] => s.data.checks;
+export const selectGoals = (s: State): Goal[] => s.data.goals;
+/** 외부 일정 + 로컬 시간표 회차. 시간표는 로드된 범위 안에서 그때그때 생성한다. */
 export function selectExt(s: State): ExtEvent[] {
-  return Object.values(s.items).filter((i): i is ExtEvent => i.kind === "ext");
+  const google = Object.values(s.ext);
+  if (!s.window) return google;
+  const classes = classInstances(s.data.classes, s.data.oneOffs, s.data.semester, s.window.from, s.window.to, s.data.classStatus, s.data.extDone);
+  return google.concat(classes);
 }
 
-// ---- actions ----
+// ---- auth ----
 
 function fail(e: unknown) {
-  const msg = e instanceof Error ? e.message : String(e);
-  set({ error: msg, loading: false });
+  set({ error: e instanceof Error ? e.message : String(e), loading: false, booting: false });
+}
+
+/** 앱 시작: 저장된 세션이 있으면 조용히 토큰을 받아 본다. */
+export async function boot(): Promise<void> {
+  if (state.signedIn) {
+    set({ booting: false });
+    await bootstrap();
+    return;
+  }
+  if (!auth.hasSession()) {
+    set({ booting: false });
+    return;
+  }
+  try {
+    await auth.requestToken(false);
+    set({ signedIn: true, booting: false });
+    await bootstrap();
+  } catch {
+    // 조용한 갱신 실패 — 로그인 버튼을 보여 준다
+    auth.dropToken();
+    set({ signedIn: false, booting: false });
+  }
 }
 
 export async function signIn(): Promise<void> {
   set({ error: null, loading: true });
   try {
     await auth.requestToken(true);
-    set({ signedIn: true });
+    set({ signedIn: true, loading: false });
     await bootstrap();
   } catch (e) {
     fail(e);
@@ -156,381 +120,215 @@ export async function signIn(): Promise<void> {
 
 export async function signOut(): Promise<void> {
   await auth.signOut();
-  set({ signedIn: false, items: {}, window: null, calendars: [] });
+  set({ signedIn: false, ext: {}, window: null, calendars: [] });
 }
 
-/** 로그인 직후: 캘린더 목록 → 앱 전용 캘린더 확보 → 기본 선택 → 오늘 주변 로드. */
 async function bootstrap(): Promise<void> {
-  const calendars = await api.listCalendars();
-  let appId = state.appCalendarId;
-  // 캐시된 ID가 목록에 없으면(지워졌거나 다른 계정) 이름으로 다시 찾고, 그래도 없으면 만든다.
-  if (!appId || !calendars.some((c) => c.id === appId)) {
-    const found = calendars.find((c) => c.summary === state.appCalendarName && c.accessRole === "owner");
-    if (found) appId = found.id;
-    else {
-      const created = await api.insertCalendar(state.appCalendarName);
-      calendars.push(created);
-      appId = created.id;
+  set({ loading: true, error: null });
+  try {
+    const calendars = await api.listCalendars();
+    let selected = state.data.selectedCalendarIds.filter((id) => calendars.some((c) => c.id === id));
+    if (selected.length === 0) {
+      const primary = calendars.find((c) => c.primary);
+      if (primary) selected = [primary.id];
     }
+    set({ calendars });
+    setData({ selectedCalendarIds: selected });
+    rollover();
+    await loadAround(todayKST());
+  } catch (e) {
+    fail(e);
   }
-  let ttId = state.timetableCalendarId;
-  if (!ttId || !calendars.some((c) => c.id === ttId)) {
-    ttId = calendars.find((c) => c.summary === TT_NAME && c.accessRole === "owner")?.id ?? null;
-  }
-  let selected = state.selectedCalendarIds.filter((id) => calendars.some((c) => c.id === id) && id !== appId && id !== ttId);
-  if (selected.length === 0) {
-    const primary = calendars.find((c) => c.primary);
-    if (primary) selected = [primary.id];
-  }
-  set({ calendars, appCalendarId: appId, timetableCalendarId: ttId, selectedCalendarIds: selected });
-  await Promise.all([loadAround(todayKST()), loadClasses()]);
 }
 
-const TT_NAME = "시간표";
+// ---- 외부 일정 읽기 ----
 
-/** anchor가 속한 주의 전주 월요일부터 4주를 읽는다. 오늘 뷰 ±와 주간 뷰 이번·다음 주를 덮는다. */
 export async function loadAround(anchor: ISODate): Promise<void> {
   const from = addDays(startOfWeek(anchor), -7);
-  const to = addDays(from, 35);
-  await loadRange(from, to);
+  await loadRange(from, addDays(from, 35));
 }
 
 export async function loadRange(from: ISODate, to: ISODate): Promise<void> {
-  const appId = state.appCalendarId;
-  if (!appId) return;
-  if (api.IS_MOCK) {
-    // 목 모드: 심어 둔 항목을 비우지 않는다.
+  if (!state.signedIn) {
     set({ window: { from, to } });
     return;
   }
   set({ loading: true, error: null });
   try {
     const nameOf = new Map(state.calendars.map((c) => [c.id, c.summary]));
-    const ttId = state.timetableCalendarId;
-    const calIds = [appId, ...(ttId ? [ttId] : []), ...state.selectedCalendarIds];
-    const results = await Promise.all(calIds.map((id) => api.listEvents(id, from, to)));
-    const items: Record<string, Item> = {};
-    calIds.forEach((calId, i) => {
+    const ids = state.data.selectedCalendarIds;
+    const results = await Promise.all(ids.map((id) => api.listEvents(id, from, to)));
+    const ext: Record<string, ExtEvent> = {};
+    ids.forEach((calId, i) => {
       for (const ev of results[i]) {
-        const it = fromEvent(ev, calId, appId, nameOf.get(calId), ttId);
-        if (it) items[key(calId, it.id)] = it;
+        const it = fromEvent(ev, calId, nameOf.get(calId), state.data.extDone);
+        if (it) ext[extKey(calId, it.id)] = it;
       }
     });
-    // 앱 캘린더의 목표 중 범위 밖에서 시작했지만 아직 살아 있는 것은 listEvents가
-    // 범위와 겹치는 한 포함한다(종일 이벤트가 범위에 걸치면 반환됨). 끝난 지 오래된 것은 안 온다.
-    set({ items, window: { from, to }, loading: false });
-    await rollover();
+    set({ ext, window: { from, to }, loading: false });
   } catch (e) {
     fail(e);
   }
 }
 
 export async function refresh(): Promise<void> {
+  rollover();
   if (state.window) await loadRange(state.window.from, state.window.to);
   else await loadAround(todayKST());
 }
 
-/** 이월: 오늘보다 앞선 미완 체크 항목을 오늘로 옮긴다 (스펙 7절). 앱을 열 때가 유일한 시점. */
-async function rollover(): Promise<void> {
+/** 이월: 오늘보다 앞선 미완 체크 항목을 오늘로 옮긴다. 앱을 열 때·새로고침 때. */
+function rollover(): void {
   const today = todayKST();
-  const cands = rolloverCandidates(selectChecks(state), today);
-  for (const c of cands) {
-    try {
-      const moved: CheckItem = { ...c, date: today, rolled: c.rolled + 1 };
-      const ev = await api.patchEvent(c.calendarId, c.id, {
-        start: { date: today },
-        end: { date: addDays(today, 1) },
-        extendedProperties: { private: { rolled: String(moved.rolled) } },
-      });
-      set({ items: { ...state.items, [key(c.calendarId, c.id)]: { ...moved, etag: ev.etag } } });
-    } catch (e) {
-      fail(e);
-    }
-  }
+  const cands = new Set(rolloverCandidates(state.data.checks, today).map((c) => c.id));
+  if (cands.size === 0) return;
+  setData({ checks: state.data.checks.map((c) => (cands.has(c.id) ? { ...c, date: today, rolled: c.rolled + 1 } : c)) });
 }
 
-function put(item: Item) {
-  set({ items: { ...state.items, [key(item.calendarId, item.id)]: item } });
+// ---- 체크 항목 ----
+
+export function createCheck(title: string, date: ISODate): void {
+  setData({ checks: [...state.data.checks, { kind: "check", id: newId(), title: title.trim(), date, done: false, rolled: 0 }] });
 }
-function remove(calendarId: string, id: string) {
-  const items = { ...state.items };
-  delete items[key(calendarId, id)];
-  set({ items });
+export function toggleCheck(c: CheckItem): void {
+  setData({ checks: state.data.checks.map((x) => (x.id === c.id ? { ...x, done: !x.done } : x)) });
+}
+export function updateCheck(c: CheckItem, patch: { title?: string; date?: ISODate }): void {
+  setData({ checks: state.data.checks.map((x) => (x.id === c.id ? { ...x, ...patch } : x)) });
 }
 
-/** 낙관적 갱신: 화면 먼저 바꾸고 patch. 실패하면 원래대로 돌리고 에러 표시. */
-async function optimistic(next: Item, prev: Item | null, work: () => Promise<{ etag?: string } | void>) {
-  put(next);
-  try {
-    const r = await work();
-    if (r && r.etag) put({ ...next, etag: r.etag });
-  } catch (e) {
-    if (prev) put(prev);
-    else remove(next.calendarId, next.id);
-    fail(e);
-  }
-}
+// ---- 목표 ----
 
-export function toggleCheck(c: CheckItem) {
-  const next = { ...c, done: !c.done };
-  return optimistic(next, c, () =>
-    api.patchEvent(c.calendarId, c.id, {
-      summary: checkEventBody(next).summary,
-      extendedProperties: { private: { done: next.done ? "1" : "0" } },
-    }),
-  );
+export function createGoal(title: string, start: ISODate, due: ISODate, target: number, unit: string): void {
+  setData({ goals: [...state.data.goals, { kind: "goal", id: newId(), title: title.trim(), start, due, target, current: 0, unit, done: false }] });
 }
-
-export function toggleExt(e: ExtEvent) {
-  const next = { ...e, done: !e.done };
-  // 사용자 캘린더에는 private 속성만 쓴다. 제목·시간은 절대 보내지 않는다.
-  return optimistic(next, e, () => api.patchEvent(e.calendarId, e.id, extDoneBody(next.done)));
-}
-
-export function setGoalCurrent(g: Goal, current: number) {
+export function setGoalCurrent(g: Goal, current: number): void {
   const n = Math.max(0, Math.min(g.target, Math.round(current)));
-  const next: Goal = { ...g, current: n, done: g.target > 0 && n >= g.target };
-  const body = goalEventBody(next, todayKST());
-  return optimistic(next, g, () =>
-    api.patchEvent(g.calendarId, g.id, {
-      summary: body.summary,
-      extendedProperties: { private: { current: String(n), done: next.done ? "1" : "0" } },
+  setData({ goals: state.data.goals.map((x) => (x.id === g.id ? { ...x, current: n, done: x.target > 0 && n >= x.target } : x)) });
+}
+export function updateGoal(g: Goal, patch: { title?: string; start?: ISODate; due?: ISODate; target?: number; unit?: string }): void {
+  setData({
+    goals: state.data.goals.map((x) => {
+      if (x.id !== g.id) return x;
+      const m = { ...x, ...patch };
+      const current = Math.min(m.current, m.target);
+      return { ...m, current, done: m.target > 0 && current >= m.target };
     }),
-  );
-}
-
-export async function createCheck(title: string, date: ISODate, parent?: string) {
-  const appId = state.appCalendarId;
-  if (!appId) return;
-  set({ error: null });
-  try {
-    const body = checkEventBody({ kind: "check", title, date, done: false, rolled: 0, parent });
-    const ev = await api.insertEvent(appId, body);
-    put({ kind: "check", id: ev.id, calendarId: appId, title, date, done: false, rolled: 0, parent, etag: ev.etag });
-  } catch (e) {
-    fail(e);
-  }
-}
-
-export async function createGoal(title: string, start: ISODate, due: ISODate, target: number, unit: string) {
-  const appId = state.appCalendarId;
-  if (!appId) return;
-  set({ error: null });
-  try {
-    const g: Omit<Goal, "id" | "calendarId" | "etag"> = { kind: "goal", title, start, due, target, current: 0, unit, done: false };
-    const ev = await api.insertEvent(appId, goalEventBody(g, todayKST()));
-    put({ ...g, id: ev.id, calendarId: appId, etag: ev.etag });
-  } catch (e) {
-    fail(e);
-  }
-}
-
-export function updateCheck(c: CheckItem, patch: { title?: string; date?: ISODate }) {
-  const next: CheckItem = { ...c, ...patch };
-  const body = checkEventBody(next);
-  return optimistic(next, c, () => api.patchEvent(c.calendarId, c.id, { summary: body.summary, start: body.start, end: body.end }));
-}
-
-export function updateGoal(g: Goal, patch: { title?: string; start?: ISODate; due?: ISODate; target?: number; unit?: string }) {
-  const merged: Goal = { ...g, ...patch };
-  const next: Goal = { ...merged, current: Math.min(merged.current, merged.target), done: merged.target > 0 && merged.current >= merged.target };
-  const body = goalEventBody(next, todayKST());
-  return optimistic(next, g, () => api.patchEvent(g.calendarId, g.id, body));
-}
-
-export async function deleteItem(item: CheckItem | Goal) {
-  const prev = item;
-  remove(item.calendarId, item.id);
-  try {
-    await api.deleteEvent(item.calendarId, item.id);
-  } catch (e) {
-    put(prev);
-    fail(e);
-  }
-}
-
-export function setSettings(settings: Settings) {
-  set({ settings });
-}
-
-export async function setSelectedCalendars(ids: string[]) {
-  set({ selectedCalendarIds: ids });
-  await refresh();
-}
-
-export function clearError() {
-  set({ error: null });
-}
-
-// ---- 시간표 ----
-
-function defFromMaster(ev: { id: string; summary?: string; location?: string; start: { dateTime?: string }; end: { dateTime?: string }; recurrence?: string[] }): ClassDef | null {
-  if (!ev.start.dateTime || !ev.end.dateTime) return null;
-  const toKst = (iso: string) => new Date(Date.parse(iso) + 9 * 3_600_000).toISOString();
-  const st = toKst(ev.start.dateTime);
-  const en = toKst(ev.end.dateTime);
-  return { id: ev.id, title: ev.summary ?? "", day: new Date(st).getUTCDay(), start: st.slice(11, 16), end: en.slice(11, 16), room: ev.location };
-}
-
-/** 시간표 캘린더의 master 수업 목록 + 학기 내 상태 예외 인스턴스. */
-export async function loadClasses(): Promise<void> {
-  const ttId = state.timetableCalendarId;
-  if (!ttId) {
-    set({ classes: [], exceptions: [] });
-    return;
-  }
-  try {
-    const [masters, flagged] = await Promise.all([
-      api.listMasters(ttId, { privateExtendedProperty: "kind=class" }),
-      api.listEvents(ttId, state.semester.start, addDays(state.semester.end, 1), { privateExtendedProperty: "flag=1" }),
-    ]);
-    const classes = masters.filter((m) => m.recurrence && m.recurrence.length > 0).map(defFromMaster).filter((d): d is ClassDef => !!d);
-    const exceptions = flagged
-      .map((ev) => fromEvent(ev, ttId, state.appCalendarId ?? "", "시간표", ttId))
-      .filter((i): i is ExtEvent => !!i && i.kind === "ext")
-      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.startTime ?? "").localeCompare(b.startTime ?? "")));
-    set({ classes, exceptions });
-  } catch (e) {
-    fail(e);
-  }
-}
-
-export function setSemester(sem: { start: ISODate; end: ISODate }) {
-  set({ semester: sem });
-}
-
-/**
- * 편집기의 목록을 캘린더에 반영한다.
- * 키(제목+요일+시작)가 같은 수업은 그대로 두고, 사라진 것은 지우고, 새 것은 만든다.
- * 그대로 두는 이유: master를 다시 만들면 그 수업의 휴강·시험 표시(예외 인스턴스)가 전부 날아가기 때문.
- */
-export async function syncTimetable(defs: ClassDef[]): Promise<{ added: number; removed: number; kept: number } | null> {
-  set({ loading: true, error: null });
-  try {
-    let ttId = state.timetableCalendarId;
-    if (!ttId) {
-      const created = await api.insertCalendar(TT_NAME);
-      ttId = created.id;
-      set({ timetableCalendarId: ttId, calendars: [...state.calendars, created] });
-    }
-    const existing = new Map(state.classes.map((c) => [defKey(c), c]));
-    const wanted = new Map(defs.map((d) => [defKey(d), d]));
-    let added = 0, removed = 0, kept = 0;
-    for (const [k, c] of existing) {
-      if (!wanted.has(k) && c.id) {
-        await api.deleteEvent(ttId, c.id);
-        removed++;
-      } else kept++;
-    }
-    for (const [k, d] of wanted) {
-      const prev = existing.get(k);
-      if (prev) {
-        // 끝 시각·강의실만 바뀐 경우 patch
-        if (prev.end !== d.end || (prev.room ?? "") !== (d.room ?? "")) {
-          const body = classMasterBody(d, state.semester.start, state.semester.end);
-          await api.patchEvent(ttId, prev.id!, { location: body.location ?? "", end: body.end, start: body.start });
-        }
-        continue;
-      }
-      await api.insertEvent(ttId, classMasterBody(d, state.semester.start, state.semester.end));
-      added++;
-    }
-    set({ loading: false });
-    await Promise.all([loadClasses(), refresh()]);
-    return { added, removed, kept };
-  } catch (e) {
-    fail(e);
-    return null;
-  }
-}
-
-/** 이미 로드된 수업 인스턴스의 상태 변경 (오늘 뷰에서 탭했을 때). */
-export function setClassStatus(e: ExtEvent, status: ClassStatus) {
-  if (!e.klass) return Promise.resolve();
-  const next: ExtEvent = { ...e, klass: { ...e.klass, status } };
-  return optimistic(next, e, async () => {
-    const r = await api.patchEvent(e.calendarId, e.id, classStatusBody(e.title, status));
-    void loadClasses();
-    return r;
   });
 }
+export function deleteItem(item: CheckItem | Goal): void {
+  if (item.kind === "check") setData({ checks: state.data.checks.filter((x) => x.id !== item.id) });
+  else setData({ goals: state.data.goals.filter((x) => x.id !== item.id) });
+}
 
-/** 날짜 + 수업으로 인스턴스를 찾아 상태를 바꾼다 (설정 화면). */
-export async function setClassStatusOn(def: ClassDef, date: ISODate, status: ClassStatus): Promise<void> {
-  const ttId = state.timetableCalendarId;
-  if (!ttId || !def.id) return;
-  set({ error: null });
-  try {
-    const inst = await api.listInstances(ttId, def.id, date, addDays(date, 1));
-    if (inst.length === 0) {
-      set({ error: `${date}에는 ${def.title} 수업이 없어요` });
-      return;
-    }
-    const ev = await api.patchEvent(ttId, inst[0].id, classStatusBody(def.title, status));
-    const it = fromEvent(ev, ttId, state.appCalendarId ?? "", "시간표", ttId);
-    if (it) put({ ...it, title: stripClassTitle(ev.summary ?? def.title) });
-    await loadClasses();
-  } catch (e) {
-    fail(e);
+// ---- 외부 일정 완료 표시 (로컬) ----
+
+export function toggleExt(e: ExtEvent): void {
+  const k = extKey(e.calendarId, e.id);
+  const extDone = { ...state.data.extDone };
+  if (extDone[k]) delete extDone[k];
+  else extDone[k] = true;
+  setData({ extDone });
+  if (e.calendarId !== TIMETABLE_CAL) {
+    set({ ext: { ...state.ext, [k]: { ...e, done: !e.done } } });
   }
 }
 
-/** 보강처럼 하루짜리 수업을 추가한다. */
-export async function addOneOffClass(title: string, date: ISODate, start: string, end: string, status: ClassStatus, room?: string): Promise<void> {
-  const ttId = state.timetableCalendarId;
-  if (!ttId) {
-    set({ error: "먼저 시간표를 캘린더에 반영해 주세요" });
+// ---- 설정 ----
+
+export function setSettings(settings: Settings): void {
+  setData({ settings });
+}
+export async function setSelectedCalendars(ids: string[]): Promise<void> {
+  setData({ selectedCalendarIds: ids });
+  await refresh();
+}
+export function setSemester(sem: { start: ISODate; end: ISODate }): void {
+  setData({ semester: sem });
+}
+export function clearError(): void {
+  set({ error: null });
+}
+
+// ---- 시간표 (로컬) ----
+
+export function saveTimetable(defs: ClassDef[]): void {
+  setData({ classes: defs.map((d) => ({ ...d, title: d.title.trim() })) });
+}
+export function setClassStatus(e: ExtEvent, status: ClassStatus): void {
+  if (!e.klass) return;
+  if (e.klass.oneOffId) {
+    setData({ oneOffs: state.data.oneOffs.map((o) => (o.id === e.klass!.oneOffId ? { ...o, status } : o)) });
     return;
   }
-  set({ error: null });
-  try {
-    const ev = await api.insertEvent(ttId, oneOffClassBody(title, date, start, end, status, room));
-    const it = fromEvent(ev, ttId, state.appCalendarId ?? "", "시간표", ttId);
-    if (it) put(it);
-    await loadClasses();
-  } catch (e) {
-    fail(e);
-  }
+  if (e.klass.defKey) setClassStatusOn(e.klass.defKey, e.date, status);
+}
+export function setClassStatusOn(key: string, date: ISODate, status: ClassStatus): void {
+  const classStatus = { ...state.data.classStatus };
+  const sk = statusKey(key, date);
+  if (status === "normal") delete classStatus[sk];
+  else classStatus[sk] = status;
+  setData({ classStatus });
+}
+export function addOneOffClass(title: string, date: ISODate, start: string, end: string, status: ClassStatus, room?: string): void {
+  const o: OneOffClass = { id: newId(), title: title.trim() || "보강", date, start, end, status, room };
+  setData({ oneOffs: [...state.data.oneOffs, o] });
+}
+export function deleteOneOff(e: ExtEvent): void {
+  if (!e.klass?.oneOffId) return;
+  setData({ oneOffs: state.data.oneOffs.filter((o) => o.id !== e.klass!.oneOffId) });
+}
+/** 이번 학기의 정상이 아닌 회차 목록 (설정 화면). */
+export function selectExceptions(s: State): ExtEvent[] {
+  const all = classInstances(s.data.classes, s.data.oneOffs, s.data.semester, s.data.semester.start, addDays(s.data.semester.end, 1), s.data.classStatus, s.data.extDone);
+  return all.filter((e) => e.klass && e.klass.status !== "normal").sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.startTime ?? "").localeCompare(b.startTime ?? "")));
 }
 
-export async function deleteOneOff(e: ExtEvent): Promise<void> {
-  remove(e.calendarId, e.id);
-  try {
-    await api.deleteEvent(e.calendarId, e.id);
-    await loadClasses();
-  } catch (err) {
-    put(e);
-    fail(err);
-  }
+// ---- 백업 ----
+
+export function exportBackup(): string {
+  return exportJson(state.data);
+}
+export function importBackup(text: string): boolean {
+  const d = importJson(text);
+  if (!d) return false;
+  set({ data: d });
+  void refresh();
+  return true;
+}
+export function resetData(): void {
+  set({ data: emptyData(DEFAULT_SETTINGS, defaultSemester()) });
 }
 
 // ---- 개발용 목 모드 (VITE_MOCK=1) ----
-// 네트워크 없이 화면만 확인한다. api/index.ts가 가짜 구현을 내보내고, 여기서는 초기 상태만 심는다.
-if (api.IS_MOCK) {
-  const items: Record<string, Item> = {};
-  for (const it of mockItems(MOCK_APP_ID)) items[key(it.calendarId, it.id)] = it;
-  const today = todayKST();
-  state = {
-    ...state,
-    signedIn: true,
-    appCalendarId: MOCK_APP_ID,
-    appCalendarName: "할 일",
-    timetableCalendarId: MOCK_TT_ID,
-    classes: [
-      { id: "cls-oop", title: "객체지향프로그래밍", day: 2, start: "09:00", end: "10:15", room: "공학관 301" },
-      { id: "cls-ai", title: "인공지능", day: 4, start: "11:00", end: "12:15", room: "IT관 204" },
-      { id: "cls-jp", title: "기초일본어", day: 4, start: "15:30", end: "16:45", room: "인문관 110" },
-      { id: "cls-hp", title: "행복의 심리", day: 5, start: "13:00", end: "14:15", room: "사회관 502" },
-    ],
-    exceptions: mockItems(MOCK_APP_ID).filter((i): i is ExtEvent => i.kind === "ext" && !!i.klass && i.klass.status !== "normal"),
-    selectedCalendarIds: ["primary"],
-    calendars: [
-      { id: "primary", summary: "기본", primary: true, accessRole: "owner", backgroundColor: "#4285f4" },
-      { id: "holidays", summary: "대한민국의 휴일", accessRole: "reader", backgroundColor: "#0b8043" },
-      { id: MOCK_APP_ID, summary: "할 일", accessRole: "owner", backgroundColor: "#f6bf26" },
-      { id: MOCK_TT_ID, summary: "시간표", accessRole: "owner", backgroundColor: "#7986cb" },
-    ],
-    items,
-    window: { from: addDays(startOfWeek(today), -7), to: addDays(startOfWeek(today), 28) },
-  };
+// 저장된 데이터가 없을 때만 시드를 넣는다 — 그래야 로컬 저장이 실제로 되는지 볼 수 있다.
+if (api.IS_MOCK && state.data.checks.length === 0 && state.data.classes.length === 0) {
+  const t = todayKST();
+  const sem = defaultSemester();
+  const d = emptyData(DEFAULT_SETTINGS, sem);
+  d.selectedCalendarIds = ["primary"];
+  d.checks = [
+    { kind: "check", id: "c1", title: "보고서 초안", date: t, done: false, rolled: 1 },
+    { kind: "check", id: "c2", title: "교수님 메일 답장", date: t, done: true, rolled: 0 },
+    { kind: "check", id: "c3", title: "동아리 장부 정리", date: addDays(t, 2), done: false, rolled: 0 },
+    { kind: "check", id: "c4", title: "발표 자료 검토", date: addDays(t, 2), done: false, rolled: 0 },
+  ];
+  d.goals = [
+    { kind: "goal", id: "g1", title: "족보 풀기", start: t, due: addDays(t, 4), target: 50, current: 23, unit: "문제", done: false },
+    { kind: "goal", id: "g2", title: "일본어 교재 읽기", start: addDays(t, -3), due: addDays(t, 2), target: 30, current: 9, unit: "쪽", done: false },
+    { kind: "goal", id: "g3", title: "지난 주 밀린 정리", start: addDays(t, -7), due: addDays(t, -1), target: 5, current: 3, unit: "회", done: false },
+  ];
+  d.classes = [
+    { title: "기초일본어", day: 1, start: "09:00", end: "12:00", room: "AI미래관 901" },
+    { title: "인공지능", day: 2, start: "13:00", end: "16:00", room: "제3공학관 702" },
+    { title: "행복의심리", day: 3, start: "09:00", end: "12:00", room: "AI미래관 202" },
+    { title: "객체지향프로그래밍", day: 3, start: "13:00", end: "16:00", room: "제1공학관 403" },
+    { title: "문학과영상", day: 4, start: "18:00", end: "20:20", room: "AI미래관 106" },
+  ];
+  const w = new Date(t + "T00:00:00Z").getUTCDay();
+  const todayDef = d.classes.find((c) => c.day === w);
+  if (todayDef) d.classStatus[statusKey(`${todayDef.title}|${todayDef.day}|${todayDef.start}`, t)] = "exam";
+  state = { ...state, signedIn: true, booting: false, data: d };
+} else if (api.IS_MOCK) {
+  state = { ...state, signedIn: true, booting: false };
 }
